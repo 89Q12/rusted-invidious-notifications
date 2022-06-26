@@ -80,10 +80,6 @@ async fn fetch_users(db: &Database) -> HashMap<String, Vec<String>> {
     db.get_users(&mut users).await.unwrap();
     db.get_subs(&mut users).await.unwrap()
 }
-/// Write new notification to the database
-async fn write_user_notification(state: Arc<Mutex<State>>, user_id: String) {
-    todo!()
-}
 
 async fn handler(
     ws: WebSocketUpgrade,
