@@ -6,7 +6,6 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::thread;
 use tracing::Level;
 
 use axum::extract::Path;
@@ -26,7 +25,7 @@ use scylla::{
     SessionBuilder,
 };
 use tokio::runtime::Handle;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 struct State {
     online_user_notifications: HashMap<String, String>, // user_id video_id
     new_videos: HashMap<String, String>,                // ChannelId, video_id
@@ -51,16 +50,20 @@ async fn main() {
             .unwrap(),
     );
     let db = Database::new("192.168.100.100:19042", None).await.unwrap();
-    let state = Arc::new(Mutex::new(State {
+    let state = Arc::new(RwLock::new(State {
         online_user_notifications: HashMap::new(),
         new_videos: HashMap::new(),
         users_channel_subscriptions: fetch_users(&db).await,
     }));
-    let handle_fill = {
+    state.write().await.users_channel_subscriptions.insert(
+        "UCz7AdIU5tFoaqs2UG3ZHQHw".to_string(),
+        ["1".to_string()].to_vec(),
+    );
+    {
         let state = state.clone();
-        thread::spawn(move || {
-            kafka_consumer("test", handle, consumer, state);
-        })
+        handle.spawn(async {
+            kafka_consumer("video_feed", consumer, state).await;
+        });
     };
     let app = Router::new()
         .route("/ws/:user_id", get(handler))
@@ -71,23 +74,22 @@ async fn main() {
         .serve(app.into_make_service())
         .await
         .unwrap();
-    handle_fill.join().unwrap();
 }
 /// Load users from the database and there subscriptions
 async fn fetch_users(db: &Database) -> HashMap<String, Vec<String>> {
     let mut users: Vec<String> = Vec::new();
     // If an error occurs, here we cant recover it anyway so panicing is fine
-    db.get_users(&mut users).await.unwrap();
+    db.get_users(&mut users).await;
     db.get_subs(&mut users).await.unwrap()
 }
 
 async fn handler(
     ws: WebSocketUpgrade,
-    Extension(state): Extension<Arc<Mutex<State>>>,
+    Extension(state): Extension<Arc<RwLock<State>>>,
     Path(user_id): Path<String>,
 ) -> Response {
     state
-        .lock()
+        .write()
         .await
         .online_user_notifications
         .insert(user_id.clone(), String::from(""));
@@ -95,38 +97,30 @@ async fn handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<Mutex<State>>, user_id: String) {
+async fn handle_socket(mut socket: WebSocket, state: Arc<RwLock<State>>, user_id: String) {
     loop {
         let res = socket.recv().await;
         match res {
             Some(msg) => match msg {
-                Ok(_) => (), // We dont care about the message, essentially we only want to see if the socket was closed
-                Err(_) => {
-                    tracing::event!(target:"ws", Level::DEBUG, "user: {} went offline", user_id);
-                    state
-                        .lock()
-                        .await
-                        .online_user_notifications
-                        .remove(&user_id);
-                    break;
-                }
-            },
-            None => (), // Still open
-        };
-
-        match state
-            .lock()
+                Ok(_) => {
+                    match state
+            .read()
             .await
             .online_user_notifications
             .get(&user_id)
             .unwrap()
-            .as_str()
+            .as_str().is_empty()
         {
-            "" => continue,
-            _ => socket
+            true => {
+                socket
+                .send(axum::extract::ws::Message::Text(format!("No notification received for user {}", user_id))).await
+                .unwrap();
+                continue
+            },
+            false => socket
                 .send(axum::extract::ws::Message::Text(
                     state
-                        .lock()
+                        .read()
                         .await
                         .online_user_notifications
                         .get(&user_id)
@@ -136,53 +130,80 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<Mutex<State>>, user_id:
                 .await
                 .unwrap(), // get video data push to database and send video data to socket
         }
+                }, // We dont care about the message, essentially we only want to see if the socket was closed
+                Err(_) => {
+                    tracing::event!(target:"ws", Level::DEBUG, "user: {} went offline", user_id);
+                    println!("user: {} went offline", user_id);
+                    state
+                        .write()
+                        .await
+                        .online_user_notifications
+                        .remove(&user_id);
+                    break;
+                }
+            },
+            None => break, // Still open
+        };
     }
 }
-fn kafka_consumer(
-    topic: &str,
-    rt_handle: Arc<Handle>,
-    consumer: Arc<StreamConsumer>,
-    state: Arc<Mutex<State>>,
-) {
+async fn kafka_consumer(topic: &str, consumer: Arc<StreamConsumer>, state: Arc<RwLock<State>>) {
     consumer.subscribe(&[topic]).unwrap();
 
     loop {
         let state = state.clone();
         let consumer = consumer.clone();
-        rt_handle.spawn(async move {
-            match consumer.recv().await {
-                Err(e) => println!("Kafka error: {}", e),
-                Ok(m) => {
-                    let payload = match m.payload_view::<str>() {
-                        None => return,
-                        Some(Ok(s)) => s,
-                        Some(Err(_)) => return,
-                    };
-                    // Deserialize the message into the appropriate struct and send it to the processing thread for further processing
-                    let new_video: NewVideo = serde_json::from_str(payload).unwrap();
-                    state
-                        .lock()
+        match consumer.recv().await {
+            Err(e) => println!("Kafka error: {}", e),
+            Ok(m) => {
+                let payload = match m.payload_view::<str>() {
+                    None => {
+                        drop(state);
+                        drop(consumer);
+                        return;
+                    }
+                    Some(Ok(s)) => s,
+                    Some(Err(_)) => {
+                        drop(state);
+                        drop(consumer);
+                        return;
+                    }
+                };
+                println!("Received {}", payload);
+                // Deserialize the message into the appropriate struct and send it to the processing thread for further processing
+                let new_video: NewVideo = serde_json::from_str(payload).unwrap();
+                state
+                    .write()
+                    .await
+                    .new_videos
+                    .insert(new_video.channel_id.clone(), new_video.video_id.clone());
+                let users: &Vec<String> = &state
+                .read()
+                .await
+                .users_channel_subscriptions
+                .get(&new_video.channel_id.clone())
+                .unwrap().to_owned();
+                println!("{:?}", users);
+                for user in users.iter() 
+                {
+                    print!("User {}",user);
+                    if state
+                        .read()
                         .await
-                        .new_videos
-                        .insert(new_video.channel_id.clone(), new_video.video_id.clone());
-                    for user in state
-                        .lock()
-                        .await
-                        .users_channel_subscriptions
-                        .get(&new_video.channel_id)
-                        .unwrap()
+                        .online_user_notifications
+                        .contains_key(user)
                     {
                         state
-                            .lock()
+                            .write()
                             .await
                             .online_user_notifications
                             .insert(user.to_string(), new_video.video_id.clone());
                     }
-                    drop(state);
-                    consumer.commit_message(&m, CommitMode::Async).unwrap();
                 }
-            };
-        });
+                consumer.commit_message(&m, CommitMode::Async).unwrap();
+                drop(state);
+                drop(consumer);
+            }
+        };
     }
 }
 
@@ -218,7 +239,7 @@ impl Database {
                 }
                 let get_user = session.prepare("SELECT * FROM users");
                 let get_user_uid = session.prepare("SELECT uid FROM username_uuid WHERE name = ?");
-                let get_subs = session.prepare("SELECT * FROM user_subscriptions");
+                let get_subs = session.prepare("SELECT channel_id FROM user_subscriptions");
                 let results = tokio::join!(get_user, get_user_uid, get_subs);
                 let mut prepared_statements = Vec::new();
                 prepared_statements.push(results.0.unwrap());
@@ -272,15 +293,17 @@ impl Database {
             };
             subvec.push(sub);
         }
-        users.iter().for_each(|user| {
-            map.insert(
-                user.to_string(),
-                subvec
-                    .iter()
-                    .filter(|sub| sub.uid == *user)
-                    .map(|sub| sub.channel_id.to_owned())
-                    .collect(),
-            );
+        subvec.iter().for_each(|sub| {
+            if !map.contains_key(&sub.channel_id) {
+                map.insert(
+                    sub.channel_id.to_owned(),
+                    subvec
+                        .iter()
+                        .filter(|inner_sub| *inner_sub.channel_id == sub.channel_id)
+                        .map(|inner_sub| inner_sub.uid.to_owned())
+                        .collect(),
+                );
+            }
         });
         Ok(map)
     }
