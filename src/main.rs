@@ -96,33 +96,38 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<RwLock<State>>, user_id
             Some(msg) => match msg {
                 Ok(_) => {
                     match state
-            .read()
-            .await
-            .online_user_notifications
-            .get(&user_id)
-            .unwrap()
-            .as_str().is_empty()
-        {
-            true => {
-                socket
-                .send(axum::extract::ws::Message::Text(format!("No notification received for user {}", user_id))).await
-                .unwrap();
-                continue
-            },
-            false => socket
-                .send(axum::extract::ws::Message::Text(
-                    state
                         .read()
                         .await
                         .online_user_notifications
                         .get(&user_id)
                         .unwrap()
-                        .to_string(),
-                ))
-                .await
-                .unwrap(), // get video data push to database and send video data to socket
-        }
-                }, // We dont care about the message, essentially we only want to see if the socket was closed
+                        .as_str()
+                        .is_empty()
+                    {
+                        true => {
+                            socket
+                                .send(axum::extract::ws::Message::Text(format!(
+                                    "No notification received for user {}",
+                                    user_id
+                                )))
+                                .await
+                                .unwrap();
+                            continue;
+                        }
+                        false => socket
+                            .send(axum::extract::ws::Message::Text(
+                                state
+                                    .read()
+                                    .await
+                                    .online_user_notifications
+                                    .get(&user_id)
+                                    .unwrap()
+                                    .to_string(),
+                            ))
+                            .await
+                            .unwrap(), // get video data push to database and send video data to socket
+                    }
+                } // We dont care about the message, essentially we only want to see if the socket was closed
                 Err(_) => {
                     tracing::event!(target:"ws", Level::DEBUG, "user: {} went offline", user_id);
                     println!("user: {} went offline", user_id);
@@ -169,15 +174,15 @@ async fn kafka_consumer(topic: &str, consumer: Arc<StreamConsumer>, state: Arc<R
                     .new_videos
                     .insert(new_video.channel_id.clone(), new_video.video_id.clone());
                 let users: &Vec<String> = &state
-                .read()
-                .await
-                .users_channel_subscriptions
-                .get(&new_video.channel_id.clone())
-                .unwrap().to_owned();
+                    .read()
+                    .await
+                    .users_channel_subscriptions
+                    .get(&new_video.channel_id.clone())
+                    .unwrap()
+                    .to_owned();
                 println!("{:?}", users);
-                for user in users.iter() 
-                {
-                    print!("User {}",user);
+                for user in users.iter() {
+                    print!("User {}", user);
                     if state
                         .read()
                         .await
