@@ -753,18 +753,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusted-invidious-types"
-version = "0.1.1"
-source = "git+https://github.com/11Tuvork28/rusted-invidious-shared.git#b5716d90058c9b6cc98965a70d581b11dcaec0f6"
-dependencies = [
- "chrono",
- "scylla",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rusted-notification-management"
+name = "rusted-invidious-notifications"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -773,6 +762,17 @@ dependencies = [
  "scylla",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rusted-invidious-types"
+version = "0.1.1"
+source = "git+https://github.com/11Tuvork28/rusted-invidious-shared.git#b5716d90058c9b6cc98965a70d581b11dcaec0f6"
+dependencies = [
+ "chrono",
+ "scylla",
  "tokio",
  "tracing",
 ]

@@ -1,5 +1,5 @@
 [package]
-name = "rusted-notification-management"
+name = "rusted-invidious-notifications"
 version = "0.1.0"
 edition = "2021"
 
