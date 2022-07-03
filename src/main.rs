@@ -72,7 +72,7 @@ async fn fetch_users(db: &DbManager) -> HashMap<String, Vec<String>> {
     let mut users: Vec<String> = Vec::new();
     // If an error occurs, here we cant recover it anyway so panicing is fine
     db.get_users(&mut users).await;
-    db.get_subs(&mut users).await.unwrap()
+    db.get_subs().await.unwrap()
 }
 
 async fn handler(
