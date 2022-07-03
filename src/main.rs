@@ -1,7 +1,4 @@
-use scylla::cql_to_rust::FromRowError;
-use scylla::transport::errors::QueryError;
-use scylla::transport::query_result::FirstRowError;
-use scylla::{FromRow, FromUserType, IntoUserType};
+use rusted_invidious_types::database::db_manager::DbManager;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -19,11 +16,6 @@ use axum::{
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::Message;
-use scylla::cql_to_rust::FromCqlVal;
-use scylla::{
-    prepared_statement::PreparedStatement, transport::errors::NewSessionError, Session,
-    SessionBuilder,
-};
 use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 struct State {
@@ -49,7 +41,7 @@ async fn main() {
             .create()
             .unwrap(),
     );
-    let db = Database::new("192.168.100.100:19042", None).await.unwrap();
+    let db = DbManager::new("192.168.100.100:19042", None).await.unwrap();
     let state = Arc::new(RwLock::new(State {
         online_user_notifications: HashMap::new(),
         new_videos: HashMap::new(),
@@ -76,7 +68,7 @@ async fn main() {
         .unwrap();
 }
 /// Load users from the database and there subscriptions
-async fn fetch_users(db: &Database) -> HashMap<String, Vec<String>> {
+async fn fetch_users(db: &DbManager) -> HashMap<String, Vec<String>> {
     let mut users: Vec<String> = Vec::new();
     // If an error occurs, here we cant recover it anyway so panicing is fine
     db.get_users(&mut users).await;
@@ -205,136 +197,4 @@ async fn kafka_consumer(topic: &str, consumer: Arc<StreamConsumer>, state: Arc<R
             }
         };
     }
-}
-
-#[derive(Debug)]
-pub enum DbError {
-    QueryError(QueryError),
-    FromRowError(FromRowError),
-    FirstRowError(FirstRowError),
-}
-struct Database {
-    session: Session,
-    prepared_statements: Vec<PreparedStatement>,
-}
-impl Database {
-    /// Initializes a new DbManager struct and creates the database session
-    async fn new(uri: &str, known_hosts: Option<Vec<String>>) -> Result<Self, NewSessionError> {
-        let session_builder;
-        if known_hosts.is_some() {
-            session_builder = SessionBuilder::new()
-                .known_node(uri)
-                .known_nodes(&known_hosts.unwrap());
-        } else {
-            session_builder = SessionBuilder::new().known_node(uri);
-        }
-
-        match session_builder.build().await {
-            Ok(session) => {
-                match session.use_keyspace("rusted_invidious", false).await {
-                    Ok(_) => {
-                        tracing::event!(target:"db", Level::DEBUG, "Successfully set keyspace")
-                    }
-                    Err(_) => panic!("KESPACE NOT FOUND EXISTING...."),
-                }
-                let get_user = session.prepare("SELECT * FROM users");
-                let get_user_uid = session.prepare("SELECT uid FROM username_uuid WHERE name = ?");
-                let get_subs = session.prepare("SELECT channel_id FROM user_subscriptions");
-                let results = tokio::join!(get_user, get_user_uid, get_subs);
-                let mut prepared_statements = Vec::new();
-                prepared_statements.push(results.0.unwrap());
-                prepared_statements.push(results.1.unwrap());
-                prepared_statements.push(results.2.unwrap());
-                Ok(Self {
-                    session,
-                    prepared_statements,
-                })
-            }
-            Err(err) => Err(err),
-        }
-    }
-    /// gets all users from the database
-    pub async fn get_users(&self, users: &mut Vec<String>) -> Option<DbError> {
-        let res = match self
-            .session
-            .execute(&self.prepared_statements.get(0).unwrap(), &[])
-            .await
-        {
-            Ok(res) => res,
-            Err(err) => return Some(DbError::QueryError(err)),
-        };
-        for row in res.rows().unwrap().into_iter() {
-            users.push(match row.into_typed::<User>() {
-                Ok(user) => user.uuid,
-                Err(err) => return Some(DbError::FromRowError(err)),
-            });
-        }
-        None
-    }
-    /// Gets the subscriptions for all users in the database
-    pub async fn get_subs(
-        &self,
-        users: &mut Vec<String>,
-    ) -> Result<HashMap<String, Vec<String>>, DbError> {
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut subvec: Vec<UserSubscribed> = Vec::new();
-        let res = match self
-            .session
-            .execute(&self.prepared_statements.get(2).unwrap(), &[])
-            .await
-        {
-            Ok(res) => res,
-            Err(err) => return Err(DbError::QueryError(err)),
-        };
-        for row in res.rows().unwrap().into_iter() {
-            let sub = match row.into_typed::<UserSubscribed>() {
-                Ok(sub) => sub,
-                Err(err) => return Err(DbError::FromRowError(err)),
-            };
-            subvec.push(sub);
-        }
-        subvec.iter().for_each(|sub| {
-            if !map.contains_key(&sub.channel_id) {
-                map.insert(
-                    sub.channel_id.to_owned(),
-                    subvec
-                        .iter()
-                        .filter(|inner_sub| *inner_sub.channel_id == sub.channel_id)
-                        .map(|inner_sub| inner_sub.uid.to_owned())
-                        .collect(),
-                );
-            }
-        });
-        Ok(map)
-    }
-}
-
-/// Represents a user queried from the database
-#[derive(Debug, IntoUserType, FromUserType, FromRow)]
-pub struct User {
-    uuid: String, // partition key
-    name: String, // clustering key
-    password: String,
-    token: String,
-    feed_needs_update: bool,
-}
-
-impl User {
-    pub fn is_authenticated(&self) -> bool {
-        self.name.is_empty()
-    }
-}
-
-/// Used to query the uuid of a user by name.
-#[derive(Debug, IntoUserType, FromUserType, FromRow)]
-pub struct UsernameUuid {
-    name: String, // Primary key
-    uuid: String,
-}
-/// Represents a channel that a user has subcribed to
-#[derive(Debug, IntoUserType, FromUserType, FromRow)]
-pub struct UserSubscribed {
-    uid: String,     // partition key
-    subuuid: String, // clustering key
-    channel_id: String,
 }
