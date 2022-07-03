@@ -13,3 +13,4 @@ tokio = { version = "1", features = ["full"] }
 rdkafka  = "0.28"
 scylla = "0.4"
 tracing = "0.1"
+rusted-invidious-types = { git = "https://github.com/11Tuvork28/rusted-invidious-shared.git" }
